@@ -24,19 +24,19 @@
 #include "system.h"
 #include "system_gl.h"
 
+#include "DVDVideoCodecStageFright.h"
 #include "StageFrightVideo.h"
 #include "StageFrightVideoPrivate.h"
 
-#include "guilib/GraphicContext.h"
 #include "DVDClock.h"
 #include "utils/log.h"
 #include "utils/fastmemcpy.h"
 #include "threads/Thread.h"
 #include "threads/Event.h"
-#include "Application.h"
-#include "ApplicationMessenger.h"
-#include "settings/AdvancedSettings.h"
 #include "android/jni/Build.h"
+#include "settings/AdvancedSettings.h"
+#include "DVDCodecs/DVDCodecInterface.h"
+#include "cores/VideoRenderers/RenderManager.h"
 
 #include "xbmc/guilib/FrameBufferObject.h"
 
@@ -368,16 +368,17 @@ public:
 
 /***********************************************************/
 
-CStageFrightVideo::CStageFrightVideo(CApplication* application, CApplicationMessenger* applicationMessenger, CWinSystemEGL* windowing, CAdvancedSettings* advsettings)
+CStageFrightVideo::CStageFrightVideo(CDVDCodecInterface* interface)
 {
 #if defined(DEBUG_VERBOSE)
   CLog::Log(LOGDEBUG, "%s::ctor: %d\n", CLASSNAME, sizeof(CStageFrightVideo));
 #endif
   p = new CStageFrightVideoPrivate;
-  p->m_g_application = application;
-  p->m_g_applicationMessenger = applicationMessenger;
-  p->m_g_Windowing = windowing;
-  p->m_g_advancedSettings = advsettings;
+  p->m_g_application = interface->GetApplication();
+  p->m_g_applicationMessenger = interface->GetApplicationMessenger();
+  p->m_g_Windowing = interface->GetWindowSystem();
+  p->m_g_advancedSettings = interface->GetAdvancedSettings();
+  p->m_g_renderManager = interface->GetRenderManager();
 }
 
 CStageFrightVideo::~CStageFrightVideo()
@@ -391,8 +392,6 @@ bool CStageFrightVideo::Open(CDVDStreamInfo &hints)
   CLog::Log(LOGDEBUG, "%s::Open\n", CLASSNAME);
 #endif
 
-  CSingleLock lock(g_graphicsContext);
-
   // stagefright crashes with null size. Trap this...
   if (!hints.width || !hints.height)
   {
@@ -401,6 +400,10 @@ bool CStageFrightVideo::Open(CDVDStreamInfo &hints)
   }
   p->width     = hints.width;
   p->height    = hints.height;
+  if (!hints.forced_aspect)
+    p->aspect_ratio = hints.aspect;
+  else
+    p->aspect_ratio = 1.0;
 
   if (p->m_g_advancedSettings->m_stagefrightConfig.useSwRenderer)
     p->quirks |= QuirkSWRender;
@@ -424,7 +427,7 @@ bool CStageFrightVideo::Open(CDVDStreamInfo &hints)
     if (p->m_g_advancedSettings->m_stagefrightConfig.useAVCcodec == 0)
       return false;
     mimetype = "video/avc";
-    if ( *(char*)hints.extradata == 1 )
+    if (hints.extradata && *(uint8_t*)hints.extradata == 1)
       p->meta->setData(kKeyAVCC, kTypeAVCC, hints.extradata, hints.extrasize);
     break;
   case CODEC_ID_MPEG4:
@@ -566,9 +569,12 @@ bool CStageFrightVideo::Open(CDVDStreamInfo &hints)
 
   for (int i=0; i<INBUFCOUNT; ++i)
   {
-    p->inbuf[i] = new MediaBuffer(300000);
+    p->inbuf[i] = new MediaBuffer(100000);
     p->inbuf[i]->setObserver(p);
   }
+
+  p->m_g_renderManager->RegisterRenderLockCallBack((const void*)this, RenderLockCallBack);
+  p->m_g_renderManager->RegisterRenderReleaseCallBack((const void*)this, RenderReleaseCallBack);
 
   p->decode_thread = new CStageFrightDecodeThread(p);
   p->decode_thread->Create(true /*autodelete*/);
@@ -649,8 +655,8 @@ bool CStageFrightVideo::ClearPicture(DVDVideoPicture* pDvdVideoPicture)
  #if defined(DEBUG_VERBOSE)
   unsigned int time = XbmcThreads::SystemClockMillis();
 #endif
-  if (pDvdVideoPicture->format == RENDER_FMT_EGLIMG && pDvdVideoPicture->eglimg != EGL_NO_IMAGE_KHR)
-    ReleaseBuffer(pDvdVideoPicture->eglimg);
+  if (pDvdVideoPicture->format == RENDER_FMT_EGLIMG)
+    ReleaseBuffer((EGLImageKHR)pDvdVideoPicture->render_ctx);
 
   if (p->prev_frame) {
     if (p->prev_frame->medbuf)
@@ -692,12 +698,21 @@ bool CStageFrightVideo::GetPicture(DVDVideoPicture* pDvdVideoPicture)
   pDvdVideoPicture->format = frame->format;
   pDvdVideoPicture->dts = DVD_NOPTS_VALUE;
   pDvdVideoPicture->pts = frame->pts;
-  pDvdVideoPicture->iWidth  = frame->width;
-  pDvdVideoPicture->iHeight = frame->height;
-  pDvdVideoPicture->iDisplayWidth = frame->width;
-  pDvdVideoPicture->iDisplayHeight = frame->height;
+  pDvdVideoPicture->iWidth  = p->width;
+  pDvdVideoPicture->iHeight = p->height;
+  pDvdVideoPicture->iDisplayWidth = p->width;
+  pDvdVideoPicture->iDisplayHeight = p->height;
+  if (p->aspect_ratio > 1.0)
+  {
+    pDvdVideoPicture->iDisplayWidth  = ((int)lrint(pDvdVideoPicture->iHeight * p->aspect_ratio)) & -3;
+    if (pDvdVideoPicture->iDisplayWidth > pDvdVideoPicture->iWidth)
+    {
+      pDvdVideoPicture->iDisplayWidth  = pDvdVideoPicture->iWidth;
+      pDvdVideoPicture->iDisplayHeight = ((int)lrint(pDvdVideoPicture->iWidth / p->aspect_ratio)) & -3;
+    }
+  }
   pDvdVideoPicture->iFlags  = DVP_FLAG_ALLOCATED;
-  pDvdVideoPicture->eglimg = EGL_NO_IMAGE_KHR;
+  pDvdVideoPicture->render_ctx = NULL;
 
   if (status != OK)
   {
@@ -714,13 +729,14 @@ bool CStageFrightVideo::GetPicture(DVDVideoPicture* pDvdVideoPicture)
 
   if (pDvdVideoPicture->format == RENDER_FMT_EGLIMG)
   {
-    pDvdVideoPicture->eglimg = frame->eglimg;
-    if (pDvdVideoPicture->eglimg == EGL_NO_IMAGE_KHR)
+    if (frame->eglimg != EGL_NO_IMAGE_KHR)
+    {
+      pDvdVideoPicture->render_ctx = (void*)frame->eglimg;
+      LockBuffer(frame->eglimg);
+    } else
       pDvdVideoPicture->iFlags |= DVP_FLAG_DROPPED;
-    else
-      LockBuffer(pDvdVideoPicture->eglimg);
-  #if defined(DEBUG_VERBOSE)
-    CLog::Log(LOGDEBUG, ">>> pic dts:%f, pts:%llu, img:%p, tm:%d\n", pDvdVideoPicture->dts, frame->pts, pDvdVideoPicture->eglimg, XbmcThreads::SystemClockMillis() - time);
+#if defined(DEBUG_VERBOSE)
+    CLog::Log(LOGDEBUG, ">>> pic dts:%f, pts:%llu, img:%p, tm:%d\n", pDvdVideoPicture->dts, frame->pts, pDvdVideoPicture->stfbuf, XbmcThreads::SystemClockMillis() - time);
   #endif
   }
   else if (pDvdVideoPicture->format == RENDER_FMT_YUV420P)
@@ -783,6 +799,9 @@ void CStageFrightVideo::Dispose()
 #if defined(DEBUG_VERBOSE)
   CLog::Log(LOGDEBUG, "%s::Close\n", CLASSNAME);
 #endif
+
+  p->m_g_renderManager->RegisterRenderLockCallBack((const void*)NULL, NULL);
+  p->m_g_renderManager->RegisterRenderReleaseCallBack((const void*)NULL, NULL);
 
   Frame *frame;
 
@@ -906,8 +925,6 @@ void CStageFrightVideo::SetSpeed(int iSpeed)
 {
 }
 
-/***************/
-
 void CStageFrightVideo::LockBuffer(EGLImageKHR eglimg)
 {
 #if defined(DEBUG_VERBOSE)
@@ -929,7 +946,7 @@ void CStageFrightVideo::LockBuffer(EGLImageKHR eglimg)
   p->free_mutex.unlock();
 }
 
-void CStageFrightVideo::ReleaseBuffer(EGLImageKHR eglimg)
+bool CStageFrightVideo::ReleaseBuffer(EGLImageKHR eglimg)
 {
 #if defined(DEBUG_VERBOSE)
   unsigned int time = XbmcThreads::SystemClockMillis();
@@ -940,13 +957,13 @@ void CStageFrightVideo::ReleaseBuffer(EGLImageKHR eglimg)
   {
     CLog::Log(LOGDEBUG, "STF: ReleaseBuffer: Unknown img(%p)", eglimg);
     p->free_mutex.unlock();
-    return;
+    return true;
   }
   if (slot->use_cnt == 0)
   {
     CLog::Log(LOGDEBUG, "STF: ReleaseBuffer: already unlocked img(%p)", eglimg);
     p->free_mutex.unlock();
-    return;
+    return true;
   }
   slot->use_cnt--;
 
@@ -954,4 +971,21 @@ void CStageFrightVideo::ReleaseBuffer(EGLImageKHR eglimg)
   CLog::Log(LOGDEBUG, "STF: ReleaseBuffer: Unlocking %p: cnt:%d tm:%d\n", eglimg, slot->use_cnt, XbmcThreads::SystemClockMillis() - time);
 #endif
   p->free_mutex.unlock();
+  return (slot->use_cnt == 0);
+}
+
+/**********************************/
+
+void CStageFrightVideo::RenderLockCallBack(const void *ctx, const void* render_ctx)
+{
+  CStageFrightVideo *codec = (CStageFrightVideo*)ctx;
+  if (codec)
+    codec->LockBuffer((EGLImageKHR)render_ctx);
+}
+
+void CStageFrightVideo::RenderReleaseCallBack(const void *ctx, const void* render_ctx)
+{
+  CStageFrightVideo *codec = (CStageFrightVideo*)ctx;
+  if (codec)
+    codec->ReleaseBuffer((EGLImageKHR)render_ctx);
 }

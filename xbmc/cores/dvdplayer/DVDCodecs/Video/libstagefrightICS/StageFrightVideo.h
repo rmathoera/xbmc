@@ -24,18 +24,16 @@
 #include "cores/dvdplayer/DVDStreamInfo.h"
 #include "DVDVideoCodec.h"
 
-class CApplication;
-class CApplicationMessenger;
-class CWinSystemEGL;
-class CAdvancedSettings;
+class CDVDCodecInterface;
 class CStageFrightVideoPrivate;
 
 namespace android { class MediaBuffer; }
+typedef void* EGLImageKHR;
 
 class CStageFrightVideo
 {
 public:
-  CStageFrightVideo(CApplication* application, CApplicationMessenger* applicationMessenger, CWinSystemEGL* windowing, CAdvancedSettings* advsettings);
+  CStageFrightVideo(CDVDCodecInterface* interface);
   virtual ~CStageFrightVideo();
 
   bool Open(CDVDStreamInfo &hints);
@@ -48,10 +46,14 @@ public:
   virtual void SetSpeed(int iSpeed);
 
   void LockBuffer(EGLImageKHR eglimg);
-  void ReleaseBuffer(EGLImageKHR eglimg);
+  bool ReleaseBuffer(EGLImageKHR eglimg);
 
 private:
   CStageFrightVideoPrivate* p;
+
+  static void RenderLockCallBack(const void *ctx, const void *render_ctx);
+  static void RenderReleaseCallBack(const void *ctx, const void *render_ctx);
+
 };
 
 // defined(HAS_LIBSTAGEFRIGHT)

@@ -54,11 +54,10 @@ class COpenMax;
 class COpenMaxVideo;
 struct OpenMaxVideoBufferHolder;
 class CDVDVideoCodecStageFright;
+class CDVDVideoCodecStageFrightBuffer;
 class CDVDMediaCodecInfo;
 class CDVDVideoCodecIMXBuffer;
 class CMMALVideoBuffer;
-typedef void* EGLImageKHR;
-
 
 // should be entirely filled by all codecs
 struct DVDVideoPicture
@@ -71,6 +70,9 @@ struct DVDVideoPicture
     struct {
       uint8_t* data[4];      // [4] = alpha channel, currently not used
       int iLineSize[4];   // [4] = alpha channel, currently not used
+    };
+    struct {
+      void* render_ctx;
     };
     struct {
       DXVA::CRenderPicture* dxva;
@@ -89,11 +91,6 @@ struct DVDVideoPicture
 
     struct {
       struct __CVBuffer *cvBufferRef;
-    };
-
-    struct {
-      CDVDVideoCodecStageFright* stf;
-      EGLImageKHR eglimg;
     };
 
     struct {

@@ -1,7 +1,7 @@
 #pragma once
 
 /*
- *      Copyright (C) 2013 Team XBMC
+ *      Copyright (C) 2014 Team Kodi
  *      http://xbmc.org
  *
  *  This Program is free software; you can redistribute it and/or modify
@@ -20,22 +20,28 @@
  *
  */
 
-#include "DVDVideoCodec.h"
+#include "utils/GlobalsHandling.h"
 
-class CStageFrightVideo;
-class CDVDCodecInterface;
+class CApplication;
+class CApplicationMessenger;
+class CWinSystemEGL;
+class CAdvancedSettings;
+class CXBMCRenderManager;
+class CGraphicContext;
 
-extern "C"
+class CDVDCodecInterface
 {
-  void* create_stf(CDVDCodecInterface* interface);
-  void destroy_stf(void*);
+public:
+  CDVDCodecInterface();
 
-  bool stf_Open(void*, CDVDStreamInfo &hints);
-  void stf_Dispose(void*);
-  int  stf_Decode(void*, uint8_t *pData, int iSize, double dts, double pts);
-  void stf_Reset(void*);
-  bool stf_GetPicture(void*, DVDVideoPicture *pDvdVideoPicture);
-  bool stf_ClearPicture(void*, DVDVideoPicture* pDvdVideoPicture);
-  void stf_SetDropState(void*, bool bDrop);
-  void stf_SetSpeed(void*, int iSpeed);
-}
+public:
+  CApplication *GetApplication() const;
+  CApplicationMessenger *GetApplicationMessenger() const;
+  CWinSystemEGL *GetWindowSystem() const;
+  CAdvancedSettings *GetAdvancedSettings() const;
+  CXBMCRenderManager *GetRenderManager() const;
+  CGraphicContext* GetGraphicsContext() const;
+};
+
+XBMC_GLOBAL_REF(CDVDCodecInterface,g_dvdcodecinterface);
+#define g_dvdcodecinterface XBMC_GLOBAL_USE(CDVDCodecInterface)

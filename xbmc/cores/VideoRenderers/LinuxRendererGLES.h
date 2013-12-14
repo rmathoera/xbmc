@@ -34,13 +34,14 @@
 #include "BaseRenderer.h"
 #include "xbmc/cores/dvdplayer/DVDCodecs/Video/DVDVideoCodec.h"
 
+#include <queue>
+
 class CRenderCapture;
 
 class CBaseTexture;
 namespace Shaders { class BaseYUV2RGBShader; }
 namespace Shaders { class BaseVideoFilterShader; }
 class COpenMaxVideo;
-class CDVDVideoCodecStageFright;
 class CDVDMediaCodecInfo;
 typedef std::vector<int>     Features;
 
@@ -164,9 +165,6 @@ public:
 #ifdef HAVE_VIDEOTOOLBOXDECODER
   virtual void         AddProcessor(struct __CVBuffer *cvBufferRef, int index);
 #endif
-#ifdef HAS_LIBSTAGEFRIGHT
-  virtual void         AddProcessor(CDVDVideoCodecStageFright* stf, EGLImageKHR eglimg, int index);
-#endif
 #if defined(TARGET_ANDROID)
   // mediaCodec
   virtual void         AddProcessor(CDVDMediaCodecInfo *mediacodec, int index);
@@ -174,6 +172,7 @@ public:
 #ifdef HAS_IMXVPU
   virtual void         AddProcessor(CDVDVideoCodecIMXBuffer *codecinfo, int index);
 #endif
+  virtual void         AddProcessor(void *render_ctx, int index);
 
 protected:
   virtual void Render(DWORD flags, int index);
@@ -284,15 +283,12 @@ protected:
     YV12Image image;
     unsigned  flipindex; /* used to decide if this has been uploaded */
 
+    void* render_ctx;
 #ifdef HAVE_LIBOPENMAX
     OpenMaxVideoBufferHolder *openMaxBufferHolder;
 #endif
 #ifdef HAVE_VIDEOTOOLBOXDECODER
     struct __CVBuffer *cvBufferRef;
-#endif
-#ifdef HAS_LIBSTAGEFRIGHT
-    CDVDVideoCodecStageFright* stf;
-    EGLImageKHR eglimg;
 #endif
 #if defined(TARGET_ANDROID)
     // mediacodec

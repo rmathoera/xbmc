@@ -107,15 +107,12 @@ CLinuxRendererGLES::YUVBUFFER::YUVBUFFER()
   memset(&fields, 0, sizeof(fields));
   memset(&image , 0, sizeof(image));
   flipindex = 0;
+  render_ctx = NULL;
 #ifdef HAVE_LIBOPENMAX
   openMaxBufferHolder = NULL;
 #endif
 #ifdef HAVE_VIDEOTOOLBOXDECODER
   cvBufferRef = NULL;
-#endif
-#ifdef HAS_LIBSTAGEFRIGHT
-  stf = NULL;
-  eglimg = EGL_NO_IMAGE_KHR;
 #endif
 #if defined(TARGET_ANDROID)
   mediacodec = NULL;
@@ -530,13 +527,16 @@ void CLinuxRendererGLES::RenderUpdate(bool clear, DWORD flags, DWORD alpha)
   if (ValidateRenderTarget())
     return;
 
+  int index = m_iYV12RenderBuffer;
+  YUVBUFFER& buf =  m_buffers[index];
+
   if (m_renderMethod & RENDER_BYPASS)
   {
     ManageDisplay();
     // if running bypass, then the player might need the src/dst rects
     // for sizing video playback on a layer other than the gles layer.
     if (m_RenderUpdateCallBackFn)
-      (*m_RenderUpdateCallBackFn)(m_RenderUpdateCallBackCtx, m_sourceRect, m_destRect);
+      (*m_RenderUpdateCallBackFn)(m_RenderUpdateCallBackCtx, m_sourceRect, m_destRect, buf.render_ctx);
 
     CRect old = g_graphicsContext.GetScissors();
 
@@ -550,14 +550,12 @@ void CLinuxRendererGLES::RenderUpdate(bool clear, DWORD flags, DWORD alpha)
 
     g_graphicsContext.SetScissors(old);
     g_graphicsContext.EndPaint();
+
     return;
   }
 
   // this needs to be checked after texture validation
   if (!m_bImageReady) return;
-
-  int index = m_iYV12RenderBuffer;
-  YUVBUFFER& buf =  m_buffers[index];
 
   if (m_format != RENDER_FMT_OMXEGL && m_format != RENDER_FMT_EGLIMG && m_format != RENDER_FMT_MEDIACODEC)
   {
@@ -965,14 +963,13 @@ void CLinuxRendererGLES::ReleaseBuffer(int idx)
     }
   }
 #endif
+  if (m_RenderReleaseCallBackFn)
+    (*m_RenderReleaseCallBackFn)(m_RenderReleaseCallBackCtx, buf.render_ctx);
+  buf.render_ctx = NULL;
 }
 
 void CLinuxRendererGLES::Render(DWORD flags, int index)
 {
-  // If rendered directly by the hardware
-  if (m_renderMethod & RENDER_BYPASS)
-    return;
-
   // obtain current field, if interlaced
   if( flags & RENDER_FLAG_TOP)
     m_currentField = FIELD_TOP;
@@ -1031,7 +1028,7 @@ void CLinuxRendererGLES::Render(DWORD flags, int index)
     RenderIMXMAPTexture(index, m_currentField);
     VerifyGLState();
   }
-  else
+  else if (!(m_renderMethod & RENDER_BYPASS))
   {
     RenderSoftware(index, m_currentField);
     VerifyGLState();
@@ -2308,6 +2305,7 @@ bool CLinuxRendererGLES::CreateNV12Texture(int index)
 
   return true;
 }
+
 void CLinuxRendererGLES::DeleteNV12Texture(int index)
 {
   YV12Image &im     = m_buffers[index].image;
@@ -2502,13 +2500,15 @@ void CLinuxRendererGLES::UploadEGLIMGTexture(int index)
   unsigned int time = XbmcThreads::SystemClockMillis();
 #endif
 
-  if(m_buffers[index].eglimg != EGL_NO_IMAGE_KHR)
+  YUVBUFFER& buf    =  m_buffers[index];
+  EGLImageKHR img   = (EGLImageKHR)buf.render_ctx;
+  if(img != EGL_NO_IMAGE_KHR)
   {
     YUVPLANE &plane = m_buffers[index].fields[0][0];
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(m_textureTarget, plane.id);
-    glEGLImageTargetTexture2DOES(m_textureTarget, (EGLImageKHR)m_buffers[index].eglimg);
+    glEGLImageTargetTexture2DOES(m_textureTarget, img);
     glBindTexture(m_textureTarget, 0);
 
     plane.flipindex = m_buffers[index].flipindex;
@@ -2530,9 +2530,6 @@ void CLinuxRendererGLES::DeleteEGLIMGTexture(int index)
   if(plane.id && glIsTexture(plane.id))
     glDeleteTextures(1, &plane.id);
   plane.id = 0;
-
-  buf.stf = NULL;
-  buf.eglimg = EGL_NO_IMAGE_KHR;
 #endif
 }
 bool CLinuxRendererGLES::CreateEGLIMGTexture(int index)
@@ -2983,27 +2980,6 @@ void CLinuxRendererGLES::AddProcessor(struct __CVBuffer *cvBufferRef, int index)
   CVBufferRetain(buf.cvBufferRef);
 }
 #endif
-#ifdef HAS_LIBSTAGEFRIGHT
-void CLinuxRendererGLES::AddProcessor(CDVDVideoCodecStageFright* stf, EGLImageKHR eglimg, int index)
-{
-#ifdef DEBUG_VERBOSE
-  unsigned int time = XbmcThreads::SystemClockMillis();
-#endif
-
-  YUVBUFFER &buf = m_buffers[index];
-  if (buf.eglimg != EGL_NO_IMAGE_KHR)
-    stf->ReleaseBuffer(buf.eglimg);
-  stf->LockBuffer(eglimg);
-
-  buf.stf = stf;
-  buf.eglimg = eglimg;
-
-#ifdef DEBUG_VERBOSE
-  CLog::Log(LOGDEBUG, "AddProcessor %d: img:%p: tm:%d\n", index, eglimg, XbmcThreads::SystemClockMillis() - time);
-#endif
-}
-#endif
-
 #if defined(TARGET_ANDROID)
 void CLinuxRendererGLES::AddProcessor(CDVDMediaCodecInfo *mediacodec, int index)
 {
@@ -3043,6 +3019,18 @@ void CLinuxRendererGLES::AddProcessor(CDVDVideoCodecIMXBuffer *buffer, int index
     buffer->Lock();
 }
 #endif
+
+void CLinuxRendererGLES::AddProcessor(void* render_ctx, int index)
+{
+  YUVBUFFER &buf = m_buffers[index];
+
+  if (m_RenderReleaseCallBackFn && buf.render_ctx)
+    (*m_RenderReleaseCallBackFn)(m_RenderReleaseCallBackCtx, buf.render_ctx);
+  if (m_RenderLockCallBackFn && render_ctx)
+    (*m_RenderLockCallBackFn)(m_RenderLockCallBackCtx, render_ctx);
+
+  buf.render_ctx = render_ctx;
+}
 
 #endif
 
